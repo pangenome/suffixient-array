@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "suffixient_array_index.hpp"
+#include <agc_text_oracle.hpp>
 
 template<class indexType, class oracleType>
 void load_index_locate(std::string textPath, std::string oraclePath, 
@@ -132,6 +133,13 @@ int main(int argc, char* argv[])
         <suffixient::suffixient_array_baseline<suffixient::bitpacked_text_oracle>,
          suffixient::bitpacked_text_oracle>
         (inputPath,inputPath+".bitpacked",inputPath+".sA",patternFile,false,correctness,true);
+    }
+    else if(indexType == "suffixient-array" and oracleType == "agc")
+    {
+        load_index_locate
+        <suffixient::suffixient_array_baseline<suffixient::agc_text_oracle>,
+         suffixient::agc_text_oracle>
+        (inputPath,inputPath,inputPath+".sA",patternFile,false,correctness,true);
     }
     else if(indexType == "suffixient-array" and oracleType == "rlz")
     {

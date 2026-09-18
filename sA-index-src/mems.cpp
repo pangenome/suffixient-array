@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "suffixient_array_index.hpp"
+#include <agc_text_oracle.hpp>
 
 template<class indexType, class oracleType>
 void load_index_mems(std::string textPath, std::string oraclePath, 
@@ -99,6 +100,13 @@ int main(int argc, char* argv[])
         load_index_mems
         <suffixient::suffixient_array_baseline<suffixient::uncompressed_text_oracle>,
          suffixient::uncompressed_text_oracle>
+        (inputPath,inputPath,inputPath+".sA",patternFile,true);
+    }
+    else if(indexType == "suffixient-array" and oracleType == "agc")
+    {
+        load_index_mems
+        <suffixient::suffixient_array_baseline<suffixient::agc_text_oracle>,
+         suffixient::agc_text_oracle>
         (inputPath,inputPath,inputPath+".sA",patternFile,true);
     }
     else if(indexType == "suffixient-array" and oracleType == "bitpacked-text")
