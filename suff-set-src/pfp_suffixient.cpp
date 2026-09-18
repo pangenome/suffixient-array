@@ -24,6 +24,7 @@ struct lcp_maxima
 };
 
 constexpr int sigma = 128; 
+constexpr int SIGMA = 128;
 
 void help(){
 
@@ -68,14 +69,14 @@ int main(int argc, char* const argv[])
 
   std::string output_file, input_path;
 
-  bool sort=false, chi=false, runs=false, dump=false;
+  bool sort=false, chi=false, runs=false, dump=false, emitA=false;
 
   FILE *suffixient_file;
 
   int w, N;
 
   int opt;
-  while ((opt = getopt(argc, argv, "drsho:w:n:i:")) != -1){
+  while ((opt = getopt(argc, argv, "Adprsho:w:n:i:")) != -1){
     switch (opt){
       case 'h':
         help();
@@ -100,6 +101,9 @@ int main(int argc, char* const argv[])
       break;
       case 'd':
         dump = true;
+      break;
+      case 'A':
+        emitA = true;
       break;
       default:
         help();
@@ -127,6 +131,71 @@ int main(int argc, char* const argv[])
   /*
   * algorithm: compute suffixient-nexessary set by streaming SA, LCP, and BWT using the PFP data structures.
   */
+
+  if(emitA)
+  {
+    // ===== Bit 4: sA components scan (mirror one_pass_build_index -t sA) =====
+    struct lcp_max4 { int64_t len; uint64_t pos; int64_t lcs; bool active; };
+    int64_t max_byte = 1;
+    std::vector<lcp_max4> R4(SIGMA, {-1, 0, -1, false});
+    std::vector<uint64_t> S0; std::vector<int64_t> L; std::vector<uint64_t> A(SIGMA, 0);
+    int64_t m4 = std::numeric_limits<int64_t>::max();
+    uint64_t i4 = 1; ++iter;
+    char p4 = iter.get_bwt(); uint64_t p4_sa = iter.get_sa();
+    max_byte = std::max<int64_t>(max_byte, (int64_t)(unsigned char)p4);
+    auto eval4 = [&](int64_t l)
+    {
+      for(int c = 1; c < (int)SIGMA; ++c)
+        if(l < R4[c].len)
+        {
+          if(R4[c].active)
+          {
+            S0.push_back(R4[c].pos - 1);          // 0-based (build_index convention)
+            L.push_back(R4[c].lcs + 1);
+            A[c]++;
+          }
+          R4[c] = {l, 0, l, false};               // lcs carried = run-min l
+        }
+    };
+    while(++iter)
+    {
+      m4 = std::min(m4, int64_t(iter.get_lcp()));
+      char c4 = iter.get_bwt(); uint64_t c4_sa = iter.get_sa();
+      max_byte = std::max<int64_t>(max_byte, (int64_t)(unsigned char)c4);
+      if(c4 != p4)
+      {
+        eval4(m4);
+        for(uint64_t ip = i4 - 1; ip < i4 + 1; ++ip)
+        {
+          char bc = (ip == i4 - 1) ? p4 : c4;                 // BWT(ip): p4 = get_bwt at i4-1 (prev), c4 at i4
+          uint64_t sap = (ip == i4 - 1) ? p4_sa : c4_sa;
+          (void)sap;
+          // NOTE: build_index uses BWT(ip) and SA[ip] of its own stream:
+          // at the boundary, BWT(i-1) = p4 with SA(i-1) = p4_sa; BWT(i) = c4 with SA(i) = c4_sa
+          auto &Rc = R4[(int)(unsigned char)bc];
+          if(int64_t(iter.get_lcp()) > Rc.len)
+            Rc = {int64_t(iter.get_lcp()), N - sap, Rc.lcs, true};
+        }
+        m4 = std::numeric_limits<int64_t>::max();
+      }
+      p4 = c4; p4_sa = c4_sa; i4++;
+    }
+    eval4(-1);
+    A.resize(max_byte + 1);
+    if(output_file.length() != 0)
+    {
+      std::string b = output_file;
+      { std::ofstream o(b + ".suff", std::ios::binary);
+        for (const auto& x : S0) { o.write(reinterpret_cast<const char*>(&x), 5); } }
+      { std::ofstream o(b + ".lcs", std::ios::binary);
+        for (const auto& x : L) { int64_t y = x; o.write(reinterpret_cast<const char*>(&y), 5); } }
+      { std::ofstream o(b + ".mult", std::ios::binary);
+        for (const auto& x : A) { o.write(reinterpret_cast<const char*>(&x), 5); } }
+      std::cout << "Size of smallest suffixient set: " << S0.size() << std::endl;
+    }
+    if(dump_file) fclose(dump_file);
+    return 0;
+  }
 
   // move forward pfp iterator to first position
   uint64_t i=1; ++iter; 
