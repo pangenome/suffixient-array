@@ -68,14 +68,14 @@ int main(int argc, char* const argv[])
 
   std::string output_file, input_path;
 
-  bool sort=false, chi=false, runs=false;
+  bool sort=false, chi=false, runs=false, dump=false;
 
   FILE *suffixient_file;
 
   int w, N;
 
   int opt;
-  while ((opt = getopt(argc, argv, "prsho:w:n:i:")) != -1){
+  while ((opt = getopt(argc, argv, "drsho:w:n:i:")) != -1){
     switch (opt){
       case 'h':
         help();
@@ -98,12 +98,17 @@ int main(int argc, char* const argv[])
       case 'r':
         runs = true;
       break;
+      case 'd':
+        dump = true;
+      break;
       default:
         help();
       return -1;
     }
   }
 
+  FILE* dump_file = nullptr;
+  std::string dump_path = input_path + ".triples";
   // compute PFP data structures
   pf_parsing pf(input_path, w);
 
@@ -128,6 +133,12 @@ int main(int argc, char* const argv[])
   char p = iter.get_bwt(), c;
   //std::cout << p;
   uint64_t p_sa = iter.get_sa(), c_sa;
+  if(dump && output_file.length() != 0)
+  {
+    if ((dump_file = fopen(dump_path.c_str(), "w")) == nullptr)
+      error("open() dump file failed");
+    fprintf(dump_file, "%d %lld %llu\n", (int)(unsigned char)p, (long long)iter.get_lcp(), (unsigned long long)p_sa);
+  }
   //std::cout << p_sa << " ";
   
   uint64_t bwtruns=1, suffixient_size=0; //tot_size = 1;
@@ -142,6 +153,8 @@ int main(int argc, char* const argv[])
     m = std::min(m,int64_t(iter.get_lcp()));
     c = iter.get_bwt();
     c_sa = iter.get_sa();
+    if(dump_file)
+      fprintf(dump_file, "%d %lld %llu\n", (int)(unsigned char)c, (long long)iter.get_lcp(), (unsigned long long)c_sa);
     //std::cout << c_sa << " ";
     //tot_size++;
 
