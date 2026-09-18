@@ -12,6 +12,7 @@
 #include <cmath>
 #include <common.hpp>
 #include <sdsl/int_vector.hpp>
+#include <algorithm>
 
 namespace suffixient{
 
@@ -53,8 +54,10 @@ public:
 	  	{
 		  	std::ifstream file_text(input_files_basepath, std::ios::binary);
 		    file_text.seekg(0, std::ios::end);
-		    this->N = file_text.tellg();
+		    auto sz = file_text.tellg();
 		    file_text.close();
+		    // AGC-native mode: no text file exists — take N from the oracle (sidecar total)
+		    if(sz > 0) this->N = sz; else this->N = O->text_length();
 		}
 	   	std::ifstream file_suff(input_files_basepath+".suff", std::ios::binary);
 	   	file_suff.seekg(0, std::ios::end);
@@ -69,10 +72,23 @@ public:
 		}
 		{
 			auto tmp = this->alph;
+			// sxgc: read all suffixient positions first, then oracle-extract their
+			// chars in POSITION order (contig-local) so the oracle cache stays warm;
+			// finally bucket in original colex order. Same chars, same buckets —
+			// but one sequential AGC sweep instead of a random contig jump per entry.
+			std::vector<uint64_t> pos(S);
+			size_t idx = 0;
 			while (file_suff.read(reinterpret_cast<char*>(&buffer[0]), 5))
+				pos[idx++] = get_5bytes_uint(&buffer[0]);
+			std::vector<uint64_t> order(pos);
+			std::sort(order.begin(), order.end());
+			std::vector<unsigned char> ch(idx);
+			for (size_t k = 0; k < idx; ++k) ch[k] = O->extract(order[k]);
+			for (size_t k = 0; k < idx; ++k)
 			{
-				a = get_5bytes_uint(&buffer[0]);
-				uchar_t c = O->extract(a);
+				a = pos[k];
+				size_t lo = std::lower_bound(order.begin(), order.end(), a) - order.begin();
+				uchar_t c = ch[lo];
 				this->Suff[tmp[c]++] = a;
 			}
 		} 

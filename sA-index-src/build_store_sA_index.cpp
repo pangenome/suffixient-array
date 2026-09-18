@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "suffixient_array_index.hpp"
+#include <agc_text_oracle.hpp>
 
 int_t compute_stored_strings_length(std::string inputPath, uint_t addSpace)
 {
@@ -121,7 +122,14 @@ int main(int argc, char* argv[])
         }
     }
 
-    if(indexType == "sA" and oracleType == "lz77")
+    if(indexType == "sA" and oracleType == "agc")
+    {
+        construct_store_index
+        <suffixient::suffixient_array_baseline<suffixient::agc_text_oracle>,
+                         suffixient::agc_text_oracle>
+        (inputPath,inputPath+".sA");
+    }
+    else if(indexType == "sA" and oracleType == "lz77")
     {
         construct_store_index
         <suffixient::suffixient_array_baseline<lz77::LZ77_compressed_text>,

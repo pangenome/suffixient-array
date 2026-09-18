@@ -11,8 +11,9 @@
 // archive. Bytes at contig boundaries are the '$' separators, exactly as the
 // flat shard text produced by agc2flat.
 //
-// Sequence cache: last-touched stored contigs are decompressed once and kept
-// (LRU, default 4 contigs) — LCP walks are cache-hits.
+// Sequence cache: fixed-size windows over the flat shard text (byte-budgeted LRU,
+// default 64 KiB windows / 256 MiB) — LCP walks are cache-hits and misses cost a
+// partial-range fetch, not a full contig decompression.
 
 #include <common.hpp>
 
@@ -50,10 +51,19 @@ private:
     std::vector<Seg> segs;       // sorted by offset
     usafe_t N = 0;
 
-    // ----- sequence cache -----
-    usafe_t cache_cap = 4;
-    std::list<std::string> cache_order;
-    std::unordered_map<std::string, std::vector<unsigned char>> cache;
+    // ----- window cache (the AGC page cache) -----
+    // The flat shard text is treated as one virtual byte array; it is cached in
+    // fixed-size windows rather than whole contigs. Miss cost = one partial-range
+    // fetch (64 KiB), not a full contig decompression; budget is in bytes so it
+    // scales to collections with tens of thousands of contigs.
+    usafe_t win_w = usafe_t(1) << 16;                 // 64 KiB windows
+    usafe_t win_budget = usafe_t(256) << 20;          // 256 MiB byte budget
+    usafe_t win_bytes = 0;
+    // stats (env SXGC_ORACLE_STATS=1 prints at exit)
+    usafe_t stat_fills = 0, stat_bytes = 0, stat_bytes_at = 0;
+    std::list<usafe_t> win_order;                     // LRU: front = oldest
+    std::unordered_map<usafe_t,
+        std::pair<std::vector<unsigned char>, std::list<usafe_t>::iterator>> win_cache;
 
     static std::string sidecar_path(std::string textPath)
     {
@@ -129,52 +139,84 @@ private:
         }
     }
 
-    // ensure the stored contig containing flat offset i is cached; returns its index in segs
-    usafe_t ensure(usafe_t i)
+    // stored contig containing flat offset i (last seg with offset <= i)
+    usafe_t shard_of(usafe_t i)
     {
-        // binary search: last seg with offset <= i
         usafe_t lo = 0, hi = segs.size();
         while(lo + 1 < hi)
         {
             usafe_t mid = (lo + hi) / 2;
             if(segs[mid].offset <= i) lo = mid; else hi = mid;
         }
-        Seg& s = segs[lo];
-        if(cache.find(s.cname) == cache.end())
+        return lo;
+    }
+
+    void fill_window(usafe_t wid)
+    {
+        usafe_t a = wid * win_w, b = a + win_w;
+        std::vector<unsigned char> buf(win_w, 0);
+        // shards intersecting [a, b); layout: shard bytes [s0, s0+len), '$' at s0+len
+        for(usafe_t z = shard_of(a); z < segs.size() && segs[z].offset < b; ++z)
         {
-            std::vector<unsigned char> buf(s.len);
-            if(s.len > 0)
+            Seg& s = segs[z];
+            usafe_t s0 = s.offset, s1 = s0 + s.len;
+            usafe_t x0 = std::max(a, s0), x1 = std::min(b, s1);
+            if(x1 > x0)
             {
-                int got = ffi_range(handle, s.cname.c_str(), 0, s.len, buf.data());
-                if(got < 0)
+                int got = ffi_range(handle, s.cname.c_str(), x0 - s0, x1 - s0,
+                                    buf.data() + (x0 - a));
+                if(got < 0 || (usafe_t)got != x1 - x0)
                 {
                     std::cerr << "agc_text_oracle: read failed for " << s.cname << std::endl;
                     exit(1);
                 }
+                stat_bytes += (x1 - x0);
             }
-            cache[s.cname] = std::move(buf);
-            cache_order.push_back(s.cname);
-            while(cache_order.size() > cache_cap)
-            {
-                cache.erase(cache_order.front());
-                cache_order.pop_front();
-            }
+            if(s1 >= a && s1 < b) buf[s1 - a] = '$';
         }
-        return lo;
+        win_cache[wid] = {std::move(buf), win_order.insert(win_order.end(), wid)};
+        win_bytes += win_w;
+        stat_fills++;
+        while(win_bytes > win_budget)
+        {
+            usafe_t old = win_order.front();
+            win_bytes -= win_w;
+            win_order.pop_front();
+            win_cache.erase(old);
+        }
     }
 
     // shard byte at flat offset i ('$' at boundaries)
     unsigned char byte_at(usafe_t i)
     {
-        usafe_t k = ensure(i);
-        Seg& s = segs[k];
-        if(i < s.offset + s.len) return cache[s.cname][i - s.offset];
-        return '$';
+        stat_bytes_at++;
+        if(i >= N) return '$';
+        usafe_t wid = i / win_w;
+        auto it = win_cache.find(wid);
+        if(it == win_cache.end())
+        {
+            fill_window(wid);
+            it = win_cache.find(wid);
+        }
+        else
+        {
+            // O(1) LRU touch
+            win_order.splice(win_order.end(), win_order, it->second.second);
+        }
+        return it->second.first[i - wid * win_w];
     }
 
 public:
 
-    agc_text_oracle(){};
+    agc_text_oracle(){}
+
+    ~agc_text_oracle()
+    {
+        if(std::getenv("SXGC_ORACLE_STATS"))
+            std::cerr << "agc_oracle_stats: fills=" << stat_fills
+                      << " ffi_bytes=" << stat_bytes
+                      << " byte_at=" << stat_bytes_at << std::endl;
+    }
 
     void build(std::string input_file_path)
     {
@@ -183,6 +225,8 @@ public:
     }
 
     // nothing to persist beyond the .agc-ref link (written here for symmetry)
+    usafe_t text_length(){ return this->N; }
+
     usafe_t store(std::string output_file_path)
     {
         std::string a = archive_ref(output_file_path);
