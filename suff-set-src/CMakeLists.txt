@@ -1,10 +1,13 @@
 add_executable(rindex_build rindex_build.cpp)
-target_link_libraries(rindex_build pfp_iterator gsacak sdsl malloc_count)
+# gsacak64: -DM64 propagates (PUBLIC) so int_t/uint_t are 64-bit in this TU —
+# REQUIRED once the dictionary text exceeds 2^32 chars (k=10 HPRC dict =
+# 5.68 G; the int32 build SIGSEGVs inside gsacak — the 2^32 dict cap)
+target_link_libraries(rindex_build pfp_iterator gsacak64 sdsl malloc_count)
 
 add_executable(rindex_query rindex_query.cpp)
-target_link_libraries(rindex_query pfp_iterator gsacak sdsl malloc_count)
+target_link_libraries(rindex_query pfp_iterator gsacak64 sdsl malloc_count)
 add_executable(pfp_suffixient pfp_suffixient.cpp)
-target_link_libraries(pfp_suffixient pfp_iterator gsacak sdsl malloc_count)
+target_link_libraries(pfp_suffixient pfp_iterator gsacak64 sdsl malloc_count)
 #target_link_libraries(pfp_suffixient common pfp pfp_iterator gsacak sdsl malloc_count)
 
 #add_executable(pfp_suffixient64 pfp_suffixient.cpp)
