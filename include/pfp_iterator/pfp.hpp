@@ -46,11 +46,10 @@ public:
   size_t n; // Size of the text
   size_t w; // Size of the window
 
-  std::vector<size_t> s_lcp_T; // LCP array of T sampled in corrispondence of the beginning of each phrase.
+  disk_vector<size_t> s_lcp_T; // sxgc rung 3: out-of-core — LCP array of T sampled at the beginning of each phrase
   sdsl::rmq_succinct_sct<> rmq_s_lcp_T;
   
-  std::vector<size_t> pos_T; // for each suffix of P we store the starting posiion of that suffix in T.
-
+  disk_vector<size_t> pos_T; // sxgc rung 3: out-of-core — for each suffix of P we store the starting position of that suffix in T.
   // std::vector<int_t>  ilist;            // Inverted list of phrases of P in BWT_P
   // sdsl::bit_vector ilist_s; // The ith 1 is in correspondence of the first occurrence of the ith phrase
   // sdsl::bit_vector::select_1_type select_ilist_s;
@@ -61,42 +60,23 @@ public:
 
   typedef size_t size_type;
 
+  std::string dv_base; // pfp basepath for scratch files
+
   // Default constructor for load
   pf_parsing() {}
 
-  pf_parsing(std::vector<uint8_t> &d_,
-             std::vector<uint32_t> &p_,
-             std::vector<uint_t> &freq_,
-             size_t w_) : 
-            dict(d_, w_),
-            pars(p_, dict.n_phrases() + 1),
-            // freq(freq_),
-            s_lcp_T(1,0),
-            pos_T(1,0),
-            // ilist(pars.p.size()),
-            // ilist_s(pars.p.size()+ 1, 0),
-            w(w_)
-  {
-    // Compute the length of the string;
-    compute_n();
-
-    // verbose("Computing b_p");
-    // _elapsed_time(compute_b_p());
-
-    // Clear unnecessary elements
-    clear_unnecessary_elements();
-  }
+  // sxgc rung 3: the RAM-vector constructor is gone — the arrays are out of
+  // core and only the file-based path exists in this tree.
 
   pf_parsing( std::string filename, size_t w_):
               dict(filename, w_),
               pars(filename,dict.n_phrases()+1),
               // freq(),
-              s_lcp_T(1,0),
-              pos_T(1,0),
               // ilist(pars.p.size()),
               // ilist_s(pars.p.size()+ 1, 0),
               w(w_)
   {
+    dv_base = filename;
 
     // Compute the length of the string;
     compute_n();
@@ -169,13 +149,17 @@ public:
   }
 
   void compute_pos_T(){
-    std::vector<size_t> poss(pars.p.size(),0);
+    // sxgc rung 3: out-of-core — poss is a scratch mapping (sequential write,
+    // random single reads), unlinked at scope exit; pos_T stays mapped for
+    // the iterator pass.
+    disk_vector<size_t> poss;
+    poss.create(dv_path(dv_base, "poss"), pars.p.size(), true);
     for (size_t j = 1; j < pars.p.size(); ++j)
     {
       poss[j] = poss[j-1] + dict.length_of_phrase(pars.p[j-1]) - w;
     }
 
-    pos_T.resize(pars.p.size(), 0);
+    pos_T.create(dv_path(dv_base, "pos_T"), pars.p.size(), true);
     for (size_t j = 0; j < pars.p.size(); ++j)
     {
       size_t pos = poss[pars.saP[j]];
@@ -197,7 +181,10 @@ public:
   void compute_s_lcp_T()
   {
     size_t n = pars.saP.size();
-    s_lcp_T.resize(n, 0);
+    // sxgc rung 3: out-of-core scratch mapping (random single writes through
+    // the mapping; writeback is sequential). Stays mapped for the iterator
+    // pass (rmq_s_lcp_T + point reads).
+    s_lcp_T.create(dv_path(dv_base, "s_lcp_T"), n, true);
 
     size_t l = 0;
     size_t lt = 0;
@@ -231,45 +218,22 @@ public:
   }
 
   void clear_unnecessary_elements(){
-    // Reducing memory tentative
-    pars.isaP.clear(); 
-    pars.isaP.shrink_to_fit();
+    // sxgc rung 3: out-of-core — unmap and unlink the scratch arrays that are
+    // no longer needed. This frees mapping space AND disk (at HPRC v2 scale
+    // these are ~1 TB of scratch).
+    pars.isaP.close();   // sacak ISA of the parse — done
+    pars.saP.close();    // sacak SA of the parse — done
+    pars.p.close();     // scratch copy of .parse (the .parse file itself stays)
 
-    pars.saP.clear(); 
-    pars.saP.shrink_to_fit();
+    // isaD is only consumed by compute_s_lcp_T (via
+    // longest_common_phrase_prefix), which has already run. The pfp_iterator
+    // never touches it.
+    dict.isaD.close();
     
-    pars.p.clear();
-    pars.p.shrink_to_fit();
-    
   }
 
-  // Serialize to a stream.
-  size_type serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const
-  {
-    sdsl::structure_tree_node *child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-    size_type written_bytes = 0;
-
-    written_bytes += dict.serialize(out, child, "dictionary");
-    written_bytes += pars.serialize(out, child, "parse");
-    written_bytes += my_serialize(s_lcp_T, out, child, "s_lcp_T");
-    written_bytes += rmq_s_lcp_T.serialize(out, child, "rmq_s_lcp_T");
-    written_bytes += sdsl::write_member(n, out, child, "n");
-    written_bytes += sdsl::write_member(w, out, child, "w");
-
-    sdsl::structure_tree::add_size(child, written_bytes);
-    return written_bytes;
-  }
-
-  //! Load from a stream.
-  void load(std::istream &in)
-  {
-    dict.load(in);
-    pars.load(in);
-    my_load(s_lcp_T, in);
-    rmq_s_lcp_T.load(in);
-    sdsl::read_member(n, in);
-    sdsl::read_member(w, in);
-  }
+  // sxgc rung 3: serialize/load removed — out-of-core members; no tool in
+  // this tree serializes the PFP structures.
 
   std::string filesuffix() const
   {

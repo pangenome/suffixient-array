@@ -26,6 +26,7 @@
 #define _PFP_PARSE_HH
 
 #include "common.hpp"
+#include "disk_vector.hpp"
 
 #include <sdsl/rmq_support.hpp>
 #include <sdsl/int_vector.hpp>
@@ -36,48 +37,42 @@ extern "C" {
 // TODO: Extend it to non-integer alphabets
 class parse{
 public:
-  std::vector<uint32_t> p;
-  std::vector<uint_t> saP;
-  std::vector<uint_t> isaP;
+  disk_vector<uint32_t> p;   // sxgc rung 3: out-of-core (scratch copy of .parse + terminator)
+  disk_vector<uint_t> saP;   // out-of-core scratch (freed after load)
+  disk_vector<uint_t> isaP;  // out-of-core scratch (freed after load)
 
-  std::vector<int_t> ilist; // Inverted list of phrases of P in BWT_P
+  disk_vector<int_t> ilist; // Inverted list of phrases of P in BWT_P (kept mapped; raw pointers into it are held by the pfp priority queue — mmap addresses are stable, so this keeps working)
   sdsl::bit_vector ilist_s; // The ith 1 is in correspondence of the first occurrence of the ith phrase
   sdsl::bit_vector::select_1_type select_ilist_s;
 
   size_t alphabet_size;
+
+  std::string dv_base; // pfp basepath for scratch files
 
   typedef size_t size_type;
 
   // Default constructor for load
   parse() {}
 
-  parse(  std::vector<uint32_t>& p_,
-          size_t alphabet_size_):
-          p(p_),
-          alphabet_size(alphabet_size_)
-  {
-    assert(p.back() == 0);
-
-    compute_freq();
-
-    build();
-
-
-  }
-
   parse(  std::string filename,
           size_t alphabet_size_):
           alphabet_size(alphabet_size_)
   {
-    // Building dictionary from file
+    // sxgc rung 3: stream the .parse file into a scratch mapping and append
+    // the 0 terminator required by sacak (the original .parse stays intact)
+    dv_base = filename;
     std::string tmp_filename = filename + std::string(".parse");
-    read_file(tmp_filename.c_str(), p);
-    p.push_back(0); // this is the terminator for the sacak algorithm
-
-    // // Uploading the frequency file
-    // tmp_filename = filename + std::string(".occ");
-    // read_file(tmp_filename.c_str(), freq);
-    // freq.insert(freq.begin(), 1);
+    struct stat st;
+    if (stat(tmp_filename.c_str(), &st) != 0)
+    { std::cerr << "cannot stat " << tmp_filename << std::endl; exit(1); }
+    size_t entries = (size_t)st.st_size / sizeof(uint32_t);
+    int fds = ::open(tmp_filename.c_str(), O_RDONLY);
+    if (fds < 0) { std::cerr << "cannot open " << tmp_filename << std::endl; exit(1); }
+    p.create(dv_path(dv_base, "p"), entries + 1, true);
+    if (entries > 0)
+      p.copy_from_fd(fds, 0, entries * sizeof(uint32_t), 0);
+    ::close(fds);
+    p[entries] = 0; // this is the terminator for the sacak algorithm
 
     compute_freq();
 
@@ -87,11 +82,12 @@ public:
 
   void build(){
 
-    saP.resize(p.size());
-    // suffix array of the parsing.
+    // suffix array of the parsing (out-of-core scratch; sacak writes
+    // through the mapping)
+    saP.create(dv_path(dv_base, "saP"), p.size(), true);
     verbose("Computing SA of the parsing");
     _elapsed_time(
-      sacak_int(&p[0],&saP[0],p.size(),alphabet_size);
+      sacak_int((int_text*)&p[0], &saP[0], p.size(), alphabet_size);
     );
 
 
@@ -103,11 +99,11 @@ public:
     );
 
 
-    // inverse suffix array of the parsing.
+    // inverse suffix array of the parsing (out-of-core scratch).
     verbose("Computing ISA of the parsing");
     _elapsed_time(
       {
-        isaP.resize(p.size());
+        isaP.create(dv_path(dv_base, "isaP"), p.size(), true);
         for(size_t i = 0; i < saP.size(); ++i){
           isaP[saP[i]] = i;
         }
@@ -121,7 +117,7 @@ public:
   void compute_ilist()
   {
 
-    ilist.resize(p.size(),0);
+    ilist.create(dv_path(dv_base, "ilist"), p.size(), true);
     ilist_s = sdsl::bit_vector(p.size() + 1, 0);
 
     // computing the bucket boundaries
@@ -164,35 +160,8 @@ public:
   }
 
   // Serialize to a stream.
-  size_type serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const
-  {
-    sdsl::structure_tree_node *child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-    size_type written_bytes = 0;
-
-    written_bytes += my_serialize(p, out, child, "parse");
-    written_bytes += my_serialize(saP, out, child, "saP");
-    written_bytes += my_serialize(isaP, out, child, "isaP");
-    written_bytes += my_serialize(ilist, out, child, "ilist");
-    written_bytes += ilist_s.serialize(out, child, "ilist_s");
-    written_bytes += select_ilist_s.serialize(out, child, "select_ilist_s");
-    written_bytes += sdsl::write_member(alphabet_size, out, child, "alphabet_size");
-    
-
-    sdsl::structure_tree::add_size(child, written_bytes);
-    return written_bytes;
-  }
-
-  //! Load from a stream.
-  void load(std::istream &in)
-  {
-    my_load(p, in);
-    my_load(saP, in);
-    my_load(isaP, in);
-    my_load(ilist, in);
-    ilist_s.load(in);
-    select_ilist_s.load(in);
-    sdsl::read_member(alphabet_size, in);
-  }
+  // sxgc rung 3: removed — out-of-core members cannot be my_serialize'd and
+  // no tool in this tree serializes the PFP structures.
 
 private:
   std::vector<uint_t> freq;

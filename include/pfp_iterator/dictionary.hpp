@@ -16,10 +16,15 @@
 */
 /*!
    \file dictionary.hpp
-   \brief dictionary.hpp define and build the prefix-free dictionary data structure.
+   \brief dictionary.hpp define and build the prefix free parsing dictionary data structure.
    \author Massimiliano Rossi
    \date 25/06/2020
    \note This is a short version of the dictionary in https://github.com/maxrossi91/pfp-data-structures
+
+   sxgc rung 3: the big arrays (d, saD, isaD, lcpD) are out-of-core
+   disk_vector mappings (scratch files, unlinked on close) so the structure
+   scales to HPRC-v2-sized dictionaries that exceed RAM. The succinct
+   structures (b_d, rmq_lcp_D) stay in RAM (~2-3 bits per element).
 */
 
 #ifndef _PFP_DICTIONARY_HH
@@ -28,6 +33,7 @@
 #include <queue>
 
 #include "common.hpp"
+#include "disk_vector.hpp"
 
 #include <sdsl/rmq_support.hpp>
 #include <sdsl/int_vector.hpp>
@@ -39,10 +45,10 @@ extern "C" {
 // TODO: Extend it to integer alphabets
 class dictionary{
 public:
-  std::vector<uint8_t> d;
-  std::vector<uint_t> saD;
-  std::vector<uint_t> isaD;
-  std::vector<int_t> lcpD;
+  disk_vector<uint8_t> d;
+  disk_vector<uint_t> saD;
+  disk_vector<uint_t> isaD;
+  disk_vector<int_t> lcpD;
   sdsl::rmq_succinct_sct<> rmq_lcp_D;
   sdsl::bit_vector b_d; // Starting position of each phrase in D
   sdsl::bit_vector::rank_1_type rank_b_d;
@@ -50,34 +56,43 @@ public:
 
   std::vector<uint8_t> alphabet;
 
+  std::string dv_base; // pfp basepath for scratch files
+
   typedef size_t size_type;
 
   // default constructor for load.
   dictionary() {}
 
-  dictionary( std::vector<uint8_t>& d_,
-              size_t w ):
-              d(d_)
-  {
-    build();
-
-  }
-
   dictionary(std::string filename,
              size_t w)
   {
-    // Building dictionary from file
+    // Building dictionary from file (out-of-core: streamed into scratch,
+    // prepending w dollars as before)
+    dv_base = filename;
     std::string tmp_filename = filename + std::string(".dict");
-    read_file(tmp_filename.c_str(), d);
+    int fdd = ::open(tmp_filename.c_str(), O_RDONLY);
+    if (fdd < 0) { std::cerr << "cannot open " << tmp_filename << std::endl; exit(1); }
+    struct stat st;
+    if (fstat(fdd, &st) != 0) { std::cerr << "fstat failed" << std::endl; exit(1); }
+    size_t file_bytes = (size_t)st.st_size;
+
+    // Count the leading dollars so we can prepend (w - n_dollars) of them.
+    size_t n_dollars = 0;
+    {
+        std::string head(std::min<size_t>(file_bytes, 1 << 20), '\0');
+        ssize_t got = pread(fdd, &head[0], head.size(), 0);
+        while (n_dollars < (size_t)got && (uint8_t)head[n_dollars] == Dollar)
+            ++n_dollars;
+    }
+
+    d.create(dv_path(dv_base, "d"), file_bytes + (w - n_dollars), true);
+    // dollars prefix
+    memset(d.data(), Dollar, w - n_dollars);
+    if (file_bytes > 0)
+        d.copy_from_fd(fdd, 0, file_bytes, w - n_dollars);
+    ::close(fdd);
+
     assert(d[0] == Dollar);
-    // Prepending w dollars to d
-    // 1. Count how many dollars there are
-    int i = 0;
-    int n_dollars = 0;
-    while(i < d.size() && d[i++] == Dollar)
-      ++n_dollars;
-    std::vector<uint8_t> dollars(w-n_dollars,Dollar);
-    d.insert(d.begin(), dollars.begin(),dollars.end());
 
     build();
 
@@ -132,70 +147,34 @@ public:
     rank_b_d = sdsl::bit_vector::rank_1_type(&b_d);
     select_b_d = sdsl::bit_vector::select_1_type(&b_d);
 
-    saD.resize(d.size());
-    lcpD.resize(d.size());
-    // daD.resize(d.size());
-    // suffix array, LCP array, and Document array of the dictionary.
+    // out-of-core SA/LCP of the dictionary (gsacak writes through the mapping)
+    saD.create(dv_path(dv_base, "saD"), d.size(), true);
+    lcpD.create(dv_path(dv_base, "lcpD"), d.size(), true);
     verbose("Computing SA, LCP, and DA of dictionary");
     _elapsed_time(
       gsacak(&d[0], &saD[0], &lcpD[0], nullptr, d.size())
-      // gsacak(&d[0], &saD[0], &lcpD[0], &daD[0], d.size())
     );
 
-    // inverse suffix array of the dictionary.
+    // inverse suffix array of the dictionary (scratch; consumed by
+    // compute_s_lcp_T, then unmapped and unlinked by the loader)
     verbose("Computing ISA of dictionary");
     _elapsed_time(
       {
-        isaD.resize(d.size());
+        isaD.create(dv_path(dv_base, "isaD"), d.size(), true);
         for(size_t i = 0; i < saD.size(); ++i){
           isaD[saD[i]] = i;
         }
       }
     );
-    
 
     verbose("Computing RMQ over LCP of dictionary");
-    // Compute the LCP rank of D
+    // Compute the LCP rank of D (sequential read over the mapping)
     _elapsed_time(
       rmq_lcp_D = sdsl::rmq_succinct_sct<>(&lcpD)
     );
-    
 
   }
 
-  
-
-  // Serialize to a stream.
-  size_type serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const
-  {
-    sdsl::structure_tree_node *child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-    size_type written_bytes = 0;
-
-    written_bytes += my_serialize(d, out, child, "dictionary");
-    written_bytes += my_serialize(saD, out, child, "saD");
-    written_bytes += my_serialize(isaD, out, child, "isaD");
-    written_bytes += my_serialize(lcpD, out, child, "lcpD");
-    written_bytes += rmq_lcp_D.serialize(out, child, "rmq_lcp_D");
-    written_bytes += b_d.serialize(out, child, "b_d");
-    written_bytes += rank_b_d.serialize(out, child, "rank_b_d");
-    written_bytes += select_b_d.serialize(out, child, "select_b_d");
-    sdsl::structure_tree::add_size(child, written_bytes);
-    return written_bytes;
-
-  }
-
-  //! Load from a stream.
-  void load(std::istream &in)
-  {
-    my_load(d, in);
-    my_load(saD, in);
-    my_load(isaD, in);
-    my_load(lcpD, in);
-    rmq_lcp_D.load(in);
-    b_d.load(in);
-    rank_b_d.load(in, &b_d);
-    select_b_d.load(in, &b_d);
-  }
 };
 
 
