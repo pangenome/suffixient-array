@@ -21,12 +21,14 @@
 
 struct RIndex
 {
-    uint64_t n = 0;          // reversed+sentinel length
+    uint64_t n = 0;          // reversed+sentinel length (v1-v3) / BWT length incl sentinels (v4)
+    uint64_t k = 0;          // v4 (BCR): number of strings
     uint64_t R = 0;          // number of runs
+    uint32_t version = 0;
     std::vector<uint64_t> C;         // 256 prefix counts
     std::vector<unsigned char> run_char;
     std::vector<uint32_t> run_len;
-    std::vector<uint64_t> sa_sample;   // v2: 64-bit
+    std::vector<uint64_t> sa_sample;   // v1-v3: SA at run ends; v4: S = fstart+L-j
 
     // derived
     std::vector<uint64_t> run_start_blk;   // every BLK runs: cumulative start
@@ -40,15 +42,18 @@ struct RIndex
     {
         std::ifstream f(path, std::ios::binary);
         if(!f){ std::cerr << "cannot open " << path << std::endl; exit(1); }
-        uint32_t magic, version, sigma;
+        uint32_t magic, sigma;   // version is the struct member
         f.read((char*)&magic, 4);
         if(!f || magic != 0x5258'5349){ std::cerr << "bad magic\n"; exit(1); }
-        f.read((char*)&version, 4); f.read((char*)&n, 8); f.read((char*)&sigma, 4); f.read((char*)&R, 8);
+        f.read((char*)&version, 4); f.read((char*)&n, 8);
+        if(version == 4) { f.read((char*)&k, 8); f.read((char*)&R, 8); }
+        else { f.read((char*)&sigma, 4); f.read((char*)&R, 8); }
+        sigma = 256;
         C.resize(256); f.read((char*)C.data(), 256*8);
         run_char.resize(R); f.read((char*)run_char.data(), R);
         run_len.resize(R); f.read((char*)run_len.data(), 4*R);
         sa_sample.resize(R);
-        if(version == 3)
+        if(version >= 3)
         {
             // packed SA: sdsl int_vector of width bits(n) (its header carries size+width)
             sdsl::int_vector<> sa_iv;
@@ -166,6 +171,7 @@ struct RIndex
     }
 
     // SA value at BWT position j (walk LF to nearest run end)
+    // v4: S at the hit = S(sampled run end) + steps (S decreases by 1 per LF)
     uint64_t sa_at(uint64_t j) const
     {
         uint64_t steps = 0;
@@ -174,7 +180,14 @@ struct RIndex
         {
             uint64_t r = run_of(pos);
             uint64_t e = run_start(r) + run_len[r];   // exclusive run end
-            if(pos == e - 1) return (sa_sample[r] + steps) % n;
+            if(pos == e - 1)
+            {
+                // v3: LF steps decrease SA by 1 each -> SA(hit) = sample + steps.
+                // v4: S = fstart + L - j INCREASES by 1 per LF step
+                //     (j decreases) -> S(hit) = sample - steps.
+                return version == 4 ? (sa_sample[r] - steps)
+                                    : (sa_sample[r] + steps) % n;
+            }
             pos = lf(pos);
             steps++;
         }
@@ -234,8 +247,10 @@ int main(int argc, char** argv)
         for(uint64_t j = l; j < r; ++j)
         {
             uint64_t sa = ri.sa_at(j);
-            long long pos = (ri_offset >= 0) ? (long long)sa - ri_offset
-                                             : (long long)(flatlen - pr.second.size() - sa);
+            long long pos = ri.version == 4
+                ? (long long)sa - (long long)pr.second.size()      // S - m
+                : (ri_offset >= 0) ? (long long)sa - ri_offset
+                                   : (long long)(flatlen - pr.second.size() - sa);
             (*out) << pos << " " << pr.second.size() << std::endl;
         }
     }
