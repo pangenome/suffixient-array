@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <fstream>
+#include <sdsl/int_vector.hpp>
 
 struct RIndex
 {
@@ -25,7 +26,7 @@ struct RIndex
     std::vector<uint64_t> C;         // 256 prefix counts
     std::vector<unsigned char> run_char;
     std::vector<uint32_t> run_len;
-    std::vector<uint32_t> sa_sample;
+    std::vector<uint64_t> sa_sample;   // v2: 64-bit
 
     // derived
     std::vector<uint64_t> run_start_blk;   // every BLK runs: cumulative start
@@ -37,16 +38,33 @@ struct RIndex
 
     void load(const std::string& path)
     {
-        FILE* f = fopen(path.c_str(), "rb");
+        std::ifstream f(path, std::ios::binary);
         if(!f){ std::cerr << "cannot open " << path << std::endl; exit(1); }
         uint32_t magic, version, sigma;
-        if(fread(&magic,4,1,f)!=1 || magic != 0x5258'5349){ std::cerr << "bad magic\n"; exit(1); }
-        fread(&version,4,1,f); fread(&n,8,1,f); fread(&sigma,4,1,f); fread(&R,8,1,f);
-        C.resize(256); fread(C.data(),8,256,f);
-        run_char.resize(R); fread(run_char.data(),1,R,f);
-        run_len.resize(R); fread(run_len.data(),4,R,f);
-        sa_sample.resize(R); fread(sa_sample.data(),4,R,f);
-        fclose(f);
+        f.read((char*)&magic, 4);
+        if(!f || magic != 0x5258'5349){ std::cerr << "bad magic\n"; exit(1); }
+        f.read((char*)&version, 4); f.read((char*)&n, 8); f.read((char*)&sigma, 4); f.read((char*)&R, 8);
+        C.resize(256); f.read((char*)C.data(), 256*8);
+        run_char.resize(R); f.read((char*)run_char.data(), R);
+        run_len.resize(R); f.read((char*)run_len.data(), 4*R);
+        sa_sample.resize(R);
+        if(version == 3)
+        {
+            // packed SA: sdsl int_vector of width bits(n) (its header carries size+width)
+            sdsl::int_vector<> sa_iv;
+            sa_iv.load(f);
+            for(uint64_t r = 0; r < R; ++r) sa_sample[r] = sa_iv[r];
+        }
+        else if(version == 2)
+        {
+            f.read((char*)sa_sample.data(), 8*R);
+        }
+        else
+        {
+            std::vector<uint32_t> tmp(R); f.read((char*)tmp.data(), 4*R);
+            for(uint64_t r = 0; r < R; ++r) sa_sample[r] = tmp[r];
+        }
+        f.close();
 
         // block index of run starts
         run_start_blk.reserve(R/BLK + 2);
