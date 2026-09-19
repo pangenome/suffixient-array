@@ -1,3 +1,8 @@
+add_executable(rindex_build rindex_build.cpp)
+target_link_libraries(rindex_build pfp_iterator gsacak sdsl malloc_count)
+
+add_executable(rindex_query rindex_query.cpp)
+target_link_libraries(rindex_query pfp_iterator gsacak sdsl malloc_count)
 add_executable(pfp_suffixient pfp_suffixient.cpp)
 target_link_libraries(pfp_suffixient pfp_iterator gsacak sdsl malloc_count)
 #target_link_libraries(pfp_suffixient common pfp pfp_iterator gsacak sdsl malloc_count)
